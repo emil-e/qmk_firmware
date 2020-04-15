@@ -62,6 +62,7 @@ typedef union {
 
 enum led_matrix_effects {
     LED_MATRIX_UNIFORM_BRIGHTNESS = 1,
+    LEF_MATRIX_TRAIL = 2,
     // All new effects go above this line
     LED_MATRIX_EFFECT_MAX
 };
@@ -90,8 +91,6 @@ void led_matrix_task(void);
 void led_matrix_update_pwm_buffers(void);
 
 bool process_led_matrix(uint16_t keycode, keyrecord_t *record);
-
-uint32_t led_matrix_get_tick(void);
 
 void    led_matrix_toggle(void);
 void    led_matrix_enable(void);

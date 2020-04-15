@@ -55,14 +55,9 @@ led_config_t led_matrix_config;
 
 bool g_suspend_state = false;
 
-// Global tick at 20 Hz
-uint32_t g_tick = 0;
-
-// Ticks since this key was last hit.
-uint8_t g_key_hit[LED_DRIVER_LED_COUNT];
-
-// Ticks since any key was last hit.
-uint32_t g_any_key_hit = 0;
+static uint8_t g_framebuffer[LED_DRIVER_LED_COUNT];
+static uint32_t g_last_time;
+static uint32_t g_acc;
 
 uint32_t eeconfig_read_led_matrix(void) { return eeprom_read_dword(EECONFIG_LED_MATRIX); }
 
@@ -85,27 +80,6 @@ void eeconfig_debug_led_matrix(void) {
     dprintf("led_matrix_config.speed = %d\n", led_matrix_config.speed);
 }
 
-// Last led hit
-#ifndef LED_HITS_TO_REMEMBER
-#    define LED_HITS_TO_REMEMBER 8
-#endif
-uint8_t g_last_led_hit[LED_HITS_TO_REMEMBER] = {255};
-uint8_t g_last_led_count                     = 0;
-
-void map_row_column_to_led(uint8_t row, uint8_t column, uint8_t *led_i, uint8_t *led_count) {
-    led_matrix led;
-    *led_count = 0;
-
-    for (uint8_t i = 0; i < LED_DRIVER_LED_COUNT; i++) {
-        // map_index_to_led(i, &led);
-        led = g_leds[i];
-        if (row == led.matrix_co.row && column == led.matrix_co.col) {
-            led_i[*led_count] = i;
-            (*led_count)++;
-        }
-    }
-}
-
 void led_matrix_update_pwm_buffers(void) { led_matrix_driver.flush(); }
 
 void led_matrix_set_index_value(int index, uint8_t value) { led_matrix_driver.set_value(index, value); }
@@ -113,27 +87,25 @@ void led_matrix_set_index_value(int index, uint8_t value) { led_matrix_driver.se
 void led_matrix_set_index_value_all(uint8_t value) { led_matrix_driver.set_value_all(value); }
 
 bool process_led_matrix(uint16_t keycode, keyrecord_t *record) {
-    if (record->event.pressed) {
-        uint8_t led[8], led_count;
-        map_row_column_to_led(record->event.key.row, record->event.key.col, led, &led_count);
-        if (led_count > 0) {
-            for (uint8_t i = LED_HITS_TO_REMEMBER; i > 1; i--) {
-                g_last_led_hit[i - 1] = g_last_led_hit[i - 2];
-            }
-            g_last_led_hit[0] = led[0];
-            g_last_led_count  = MIN(LED_HITS_TO_REMEMBER, g_last_led_count + 1);
+    uint8_t value = record->event.pressed ? 255 : 254;
+    for (uint8_t i = 0; i < LED_DRIVER_LED_COUNT; i++) {
+        if (g_leds[i].matrix_co.row == record->event.key.row && g_leds[i].matrix_co.col == record->event.key.col) {
+            g_framebuffer[i] = value;
         }
-        for (uint8_t i = 0; i < led_count; i++) g_key_hit[led[i]] = 0;
-        g_any_key_hit = 0;
-    } else {
-#ifdef LED_MATRIX_KEYRELEASES
-        uint8_t led[8], led_count;
-        map_row_column_to_led(record->event.key.row, record->event.key.col, led, &led_count);
-        for (uint8_t i = 0; i < led_count; i++) g_key_hit[led[i]] = 255;
-
-        g_any_key_hit = 255;
-#endif
     }
+
+    if (record->event.pressed) {
+        switch (keycode) {
+            case LED_MATRIX_MODE_FORWARD:
+                led_matrix_step();
+                return false;
+
+            case LED_MATRIX_MODE_REVERSE:
+                led_matrix_step_reverse();
+                return false;
+        }
+    }
+
     return true;
 }
 
@@ -145,7 +117,19 @@ void led_matrix_all_off(void) { led_matrix_set_index_value_all(0); }
 // Uniform brightness
 void led_matrix_uniform_brightness(void) { led_matrix_set_index_value_all(LED_MATRIX_MAXIMUM_BRIGHTNESS / BACKLIGHT_LEVELS * led_matrix_config.val); }
 
-void led_matrix_custom(void) {}
+void led_matrix_trail(void) {
+    g_acc += timer_elapsed32(g_last_time);
+    g_last_time   = timer_read32();
+    uint8_t ticks = g_acc / 5;
+    g_acc         = g_acc % 5;
+
+    for (uint8_t i = 0; i < LED_DRIVER_LED_COUNT; i++) {
+        led_matrix_set_index_value(i, g_framebuffer[i]);
+        if (g_framebuffer[i] != 255) {
+            g_framebuffer[i] -= MIN(ticks, g_framebuffer[i]);
+        }
+    }
+}
 
 void led_matrix_task(void) {
     if (!led_matrix_config.enable) {
@@ -154,22 +138,9 @@ void led_matrix_task(void) {
         return;
     }
 
-    g_tick++;
-
-    if (g_any_key_hit < 0xFFFFFFFF) {
-        g_any_key_hit++;
-    }
-
-    for (int led = 0; led < LED_DRIVER_LED_COUNT; led++) {
-        if (g_key_hit[led] < 255) {
-            if (g_key_hit[led] == 254) g_last_led_count = MAX(g_last_led_count - 1, 0);
-            g_key_hit[led]++;
-        }
-    }
-
     // Ideally we would also stop sending zeros to the LED driver PWM buffers
     // while suspended and just do a software shutdown. This is a cheap hack for now.
-    bool    suspend_backlight = ((g_suspend_state && LED_DISABLE_WHEN_USB_SUSPENDED) || (LED_DISABLE_AFTER_TIMEOUT > 0 && g_any_key_hit > LED_DISABLE_AFTER_TIMEOUT * 60 * 20));
+    bool    suspend_backlight = g_suspend_state && LED_DISABLE_WHEN_USB_SUSPENDED;
     uint8_t effect            = suspend_backlight ? 0 : led_matrix_config.mode;
 
     // this gets ticked at 20 Hz.
@@ -179,8 +150,11 @@ void led_matrix_task(void) {
         case LED_MATRIX_UNIFORM_BRIGHTNESS:
             led_matrix_uniform_brightness();
             break;
+        case LEF_MATRIX_TRAIL:
+            led_matrix_trail();
+            break;
         default:
-            led_matrix_custom();
+            led_matrix_all_off();
             break;
     }
 
@@ -201,32 +175,16 @@ __attribute__((weak)) void led_matrix_indicators_kb(void) {}
 
 __attribute__((weak)) void led_matrix_indicators_user(void) {}
 
-// void led_matrix_set_indicator_index(uint8_t *index, uint8_t row, uint8_t column)
-// {
-//  if (row >= MATRIX_ROWS)
-//  {
-//      // Special value, 255=none, 254=all
-//      *index = row;
-//  }
-//  else
-//  {
-//      // This needs updated to something like
-//      // uint8_t led[8], led_count;
-//      // map_row_column_to_led(row,column,led,&led_count);
-//      // for(uint8_t i = 0; i < led_count; i++)
-//      map_row_column_to_led(row, column, index);
-//  }
-// }
-
 void led_matrix_init(void) {
     led_matrix_driver.init();
 
     // Wait half a second for the driver to finish initializing
     wait_ms(500);
 
-    // clear the key hits
-    for (int led = 0; led < LED_DRIVER_LED_COUNT; led++) {
-        g_key_hit[led] = 255;
+    g_last_time = timer_read32();
+
+    for (uint8_t i = 0; i < LED_DRIVER_LED_COUNT; i++) {
+      g_framebuffer[i] = 0;
     }
 
     if (!eeconfig_is_enabled()) {
@@ -258,29 +216,6 @@ static uint8_t decrement(uint8_t value, uint8_t step, uint8_t min, uint8_t max) 
     new_value -= step;
     return MIN(MAX(new_value, min), max);
 }
-
-// void *backlight_get_custom_key_value_eeprom_address(uint8_t led) {
-//     // 3 bytes per value
-//     return EECONFIG_LED_MATRIX + (led * 3);
-// }
-
-// void backlight_get_key_value(uint8_t led, uint8_t *value) {
-//     void *address = backlight_get_custom_key_value_eeprom_address(led);
-//     value = eeprom_read_byte(address);
-// }
-
-// void backlight_set_key_value(uint8_t row, uint8_t column, uint8_t value) {
-//     uint8_t led[8], led_count;
-//     map_row_column_to_led(row,column,led,&led_count);
-//     for(uint8_t i = 0; i < led_count; i++) {
-//         if (led[i] < LED_DRIVER_LED_COUNT) {
-//             void *address = backlight_get_custom_key_value_eeprom_address(led[i]);
-//             eeprom_update_byte(address, value);
-//         }
-//     }
-// }
-
-uint32_t led_matrix_get_tick(void) { return g_tick; }
 
 void led_matrix_toggle(void) {
     led_matrix_config.enable ^= 1;

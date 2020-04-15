@@ -16,7 +16,10 @@
  * Modifications for QMK and STM32F303 by Yiancar
  */
 
-#if defined(EEPROM_EMU_STM32F303xC)
+#if defined(EEPROM_EMU_STM32F302x8)
+#    define STM32F302x8
+#    include "stm32f3xx.h"
+#elif defined(EEPROM_EMU_STM32F303xC)
 #    define STM32F303xC
 #    include "stm32f3xx.h"
 #elif defined(EEPROM_EMU_STM32F103xB)

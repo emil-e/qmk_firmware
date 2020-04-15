@@ -281,6 +281,9 @@ bool process_record_quantum(keyrecord_t *record) {
 #if defined(RGBLIGHT_ENABLE) || defined(RGB_MATRIX_ENABLE)
             process_rgb(keycode, record) &&
 #endif
+#if defined(LED_MATRIX_ENABLE)
+            process_led_matrix(keycode, record) &&
+#endif
             true)) {
         return false;
     }

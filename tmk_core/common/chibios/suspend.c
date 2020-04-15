@@ -116,9 +116,6 @@ void suspend_wakeup_init(void) {
     host_system_send(0);
     host_consumer_send(0);
 #endif /* EXTRAKEY_ENABLE */
-#ifdef BACKLIGHT_ENABLE
-    backlight_init();
-#endif /* BACKLIGHT_ENABLE */
 #if defined(RGBLIGHT_SLEEP) && defined(RGBLIGHT_ENABLE)
     is_suspended = false;
     if (rgblight_enabled) {
